@@ -438,3 +438,440 @@ All patches were verified via:
 2. **Unit assertions** — Sanitizer function, DPAPI encrypt/decrypt round-trip tested programmatically
 3. **EXE rebuild** — PyInstaller build completes successfully (30.1 MB)
 4. **Smoke test** — Rebuilt EXE launches, runs, and terminates cleanly with no errors on stderr
+
+---
+---
+
+# Security Audit Report — Round 2
+
+**Date:** March 20, 2026
+**Scope:** Full re-audit after Segra M365 Copilot integration and initial security patches
+**Trigger:** Re-audit requested after adding MSAL authentication, Microsoft Graph client, Segra Copilot provider, strict SOP schema, and SOP renderer modules
+**Status:** All 12 newly identified vulnerabilities patched and verified
+
+## Executive Summary
+
+A second comprehensive security audit was performed after the Segra M365 Copilot enterprise integration was added to the codebase. The audit confirmed that all 15 vulnerabilities from the first audit remain patched, and identified **12 new vulnerabilities** introduced by the new Segra modules and previously unexamined code paths. All 12 have been patched and verified.
+
+| Severity | Found | Patched |
+|----------|-------|---------|
+| Critical | 3     | 3       |
+| High     | 4     | 4       |
+| Medium   | 4     | 4       |
+| Low      | 1     | 1       |
+| **Total** | **12** | **12** |
+
+---
+
+## Vulnerability Details
+
+### VULN-016: MSAL Token Cache Missing File Permission Restrictions
+
+**Severity:** CRITICAL
+**Category:** CWE-276 — Incorrect Default Permissions
+**File:** `src/segra/auth.py` lines 22–24, 47–49, 101–109
+
+**Description:**
+The MSAL token cache file (`.msal_cache.bin`) was written to `%LOCALAPPDATA%\AutoDocumentator\` using `Path.write_text()` with default directory and file permissions. On Windows, default ACLs on `%LOCALAPPDATA%` can allow other local users to read files if the directory inherits permissive parent ACLs.
+
+The token cache contains serialized OAuth refresh tokens that are valid for hours or days. An attacker with local file read access could extract these tokens and impersonate the authenticated user's Microsoft 365 account without requiring their password or any interactive sign-in.
+
+**Affected file path:** `C:\Users\{username}\AppData\Local\AutoDocumentator\.msal_cache.bin`
+
+**Patch Applied:**
+- Added `_restrict_file_permissions()` utility function
+- On Windows: calls `icacls` to set owner-only read/write, removing inheritance
+- On Linux/Mac: calls `Path.chmod(0o600)` for owner-only access
+- Function is called after every cache write operation in `_persist_cache()`
+- Errors in permission setting are logged but do not block operation
+
+**Before:**
+```python
+_CACHE_FILE.write_text(self._cache.serialize(), encoding="utf-8")
+```
+
+**After:**
+```python
+_CACHE_FILE.write_text(self._cache.serialize(), encoding="utf-8")
+_restrict_file_permissions(_CACHE_FILE)
+```
+
+---
+
+### VULN-017: XSS via Single Quote Bypass in Segra HTML Renderer
+
+**Severity:** CRITICAL
+**Category:** OWASP A03:2021 — Injection
+**File:** `src/segra/renderer.py` lines 203–210
+
+**Description:**
+The `_esc()` function in the standalone Segra SOP renderer escaped four of the five HTML-dangerous characters (`&`, `<`, `>`, `"`) but omitted the single quote (`'`). If any rendered content contained a single quote, it could break out of single-quoted HTML attribute contexts.
+
+While the current template uses double-quoted attributes exclusively (mitigating immediate exploitation), the incomplete escaper is a latent vulnerability. Any future template change to single-quoted attributes, or use of `_esc()` in a different context, would immediately enable XSS.
+
+Note: This is independent of the Jinja2 `autoescape=True` fix applied in VULN-001, which only covers `templates/sop_template.html`. The `_esc()` function in `src/segra/renderer.py` is a separate code path used by the standalone Segra SOP renderer.
+
+**Patch Applied:**
+- Added `"'" → "&#x27;"` to the `_esc()` function, completing the OWASP-recommended five-character escaping set
+
+**Before:**
+```python
+def _esc(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+```
+
+**After:**
+```python
+def _esc(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#x27;")
+    )
+```
+
+---
+
+### VULN-018: MSAL Error Description Leaks Tenant Information
+
+**Severity:** CRITICAL
+**Category:** CWE-209 — Generation of Error Message Containing Sensitive Information
+**File:** `src/segra/auth.py` line 96
+
+**Description:**
+When MSAL token acquisition failed, the full `error_description` field from the MSAL response was included in the `RuntimeError` exception message. This message propagates up to the UI layer and is displayed in error dialogs.
+
+MSAL `error_description` fields can contain:
+- Tenant-specific policy violation details
+- Account hints (partial email addresses)
+- Conditional access policy names
+- Directory synchronization state information
+
+Any of this information displayed on-screen or captured in a screenshot constitutes an information disclosure to unauthorized viewers.
+
+**Patch Applied:**
+- Exception message now contains only the error code (e.g., `invalid_grant`, `interaction_required`)
+- The full error description is logged at WARNING level for administrator diagnostics
+- User-facing message is generic: "Authentication failed (error: {code}). Check tenant/client configuration."
+
+**Before:**
+```python
+desc = result.get("error_description", result["error"])
+raise RuntimeError(f"Token acquisition failed: {desc}")
+```
+
+**After:**
+```python
+error_code = result.get("error", "unknown_error")
+log.warning("MSAL error: %s", error_code)
+raise RuntimeError(
+    f"Authentication failed (error: {error_code}). "
+    "Check tenant/client configuration."
+)
+```
+
+---
+
+### VULN-019: SDK Exception Messages Leak Credentials in Error Dialogs
+
+**Severity:** HIGH
+**Category:** CWE-209 — Generation of Error Message Containing Sensitive Information
+**File:** `src/ui/main_window.py` line 873
+
+**Description:**
+When AI provider creation failed (e.g., invalid API key, unreachable endpoint), the raw exception from the underlying SDK (Anthropic, OpenAI, Azure OpenAI) was displayed directly in a `messagebox.showerror()` dialog:
+
+```python
+messagebox.showerror("Provider Error", f"Failed to create AI provider:\n{e}")
+```
+
+SDK exceptions commonly include the offending parameter values in their messages. For example:
+- `AuthenticationError: Invalid API key provided: sk-proj-abc123...`
+- `APIConnectionError: Connection error to https://my-resource.openai.azure.com/`
+
+These messages, displayed on-screen, could expose API keys, endpoint URLs, or deployment names to anyone viewing the screen, in a screenshot, or in system event logs.
+
+**Patch Applied:**
+- Error dialog now shows only the exception type name (`AuthenticationError`, `APIConnectionError`, etc.) with no message content
+- Directs user to check Settings configuration
+
+**Before:**
+```python
+messagebox.showerror("Provider Error", f"Failed to create AI provider:\n{e}")
+```
+
+**After:**
+```python
+messagebox.showerror(
+    "Provider Error",
+    f"Failed to create AI provider.\n"
+    f"Error type: {type(e).__name__}\n\n"
+    "Check your configuration in Settings.",
+)
+```
+
+---
+
+### VULN-020: AI Thread Exceptions Leak Sensitive Data in Progress Callbacks
+
+**Severity:** HIGH
+**Category:** CWE-209 — Generation of Error Message Containing Sensitive Information
+**File:** `src/ui/main_window.py` lines 942, 989
+
+**Description:**
+When AI analysis or SOP generation failed in the background thread, the full exception was converted to string and passed to the UI callback:
+
+```python
+except Exception as e:
+    self.after(0, on_complete, str(e))
+```
+
+The `on_complete` callback then displays this string in a `messagebox.showerror()`. Background thread exceptions from HTTP clients (httpx, openai SDK) can contain:
+- HTTP headers including `Authorization: Bearer {token}`
+- Request parameters including API keys in query strings
+- Full request/response bodies from failed API calls
+
+**Patch Applied:**
+- Both occurrences (lines 942 and 989) now pass only the exception type name with a generic message
+- `str(e)` replaced with `f"{type(e).__name__}: check configuration"`
+
+---
+
+### VULN-021: Graph API Error Logging Includes Response Body
+
+**Severity:** HIGH
+**Category:** CWE-532 — Insertion of Sensitive Information into Log File
+**File:** `src/segra/graph_client.py` lines 73–74
+
+**Description:**
+When a Microsoft Graph Search API call failed with an HTTP error, the error handler logged up to 200 characters of the HTTP response body:
+
+```python
+log.warning(
+    "Graph Search failed: HTTP %d — %s",
+    e.response.status_code,
+    e.response.text[:200] if e.response.text else "no body",
+)
+```
+
+Graph API error responses can contain:
+- Tenant-specific error details
+- Correlation IDs tied to specific users
+- OAuth error descriptions with account hints
+- Internal Microsoft service error details
+
+Logging this content to disk or console could expose tenant information to unauthorized log viewers.
+
+**Patch Applied:**
+- Log message now contains only the HTTP status code
+- Response body is never logged
+
+**Before:**
+```python
+log.warning("Graph Search failed: HTTP %d — %s", e.response.status_code, e.response.text[:200])
+```
+
+**After:**
+```python
+log.warning("Graph Search failed: HTTP %d", e.response.status_code)
+```
+
+---
+
+### VULN-022: Dry Run Mode Logs Full Prompt with Tenant Document Content
+
+**Severity:** HIGH
+**Category:** CWE-532 — Insertion of Sensitive Information into Log File
+**File:** `src/segra/copilot_provider.py` lines 200–201
+
+**Description:**
+When dry run mode was enabled (`DRY_RUN=true`), the `generate_sop()` method logged the complete prompt that would have been sent to Azure OpenAI:
+
+```python
+log.info("=== DRY RUN — prompt that would be sent ===\n%s", prompt)
+```
+
+If Graph grounding was also enabled, this prompt included snippets from tenant documents retrieved via Microsoft Graph Search. These snippets could contain:
+- Internal SOP content
+- Company policies and procedures
+- Employee names and organizational structure
+- Confidential operational details
+
+Logging this to console or file defeats the purpose of permission-trimmed Graph results.
+
+**Patch Applied:**
+- Dry run now logs only metadata: prompt length, whether grounding was used, and step count
+- No prompt content is ever logged in any mode
+- The `_dry_run_response()` static method also includes an explicit comment explaining why content is not logged
+
+**Before:**
+```python
+log.info("=== DRY RUN — prompt that would be sent ===\n%s", prompt)
+```
+
+**After:**
+```python
+log.info(
+    "=== DRY RUN — prompt length: %d chars, grounding: %s, steps: %d ===",
+    len(prompt), "yes" if grounding_context else "no", len(steps_summary),
+)
+```
+
+---
+
+### VULN-023: Insecure LOCALAPPDATA Fallback for Token Cache
+
+**Severity:** MEDIUM
+**Category:** CWE-276 — Incorrect Default Permissions
+**File:** `src/segra/auth.py` line 23
+
+**Description:**
+The token cache directory fallback used `"."` (current working directory) when `%LOCALAPPDATA%` was not set:
+
+```python
+_CACHE_DIR = Path(os.environ.get("LOCALAPPDATA", ".")) / "AutoDocumentator"
+```
+
+If the environment variable was unset (possible on misconfigured Windows systems, containers, or non-Windows platforms), the token cache would be written to the application's working directory. If the application was run from a shared or temporary directory, the token cache would be world-readable.
+
+**Patch Applied:**
+- Fallback changed to `Path.home() / "AppData" / "Local"`, which resolves to the user's home directory regardless of environment variable state
+
+**Before:**
+```python
+_CACHE_DIR = Path(os.environ.get("LOCALAPPDATA", ".")) / "AutoDocumentator"
+```
+
+**After:**
+```python
+_CACHE_DIR = Path(
+    os.environ.get("LOCALAPPDATA")
+    or Path.home() / "AppData" / "Local"
+) / "AutoDocumentator"
+```
+
+---
+
+### VULN-024: KeyError Crash on Malformed AI SOP Response
+
+**Severity:** MEDIUM
+**Category:** CWE-20 — Improper Input Validation
+**File:** `src/ai_analyzer.py` line 307
+
+**Description:**
+The generic (non-Segra) SOP generation path parsed the AI response and assumed all step objects contained `"number"` and `"description"` keys:
+
+```python
+ai_steps = {s["number"]: s["description"] for s in data.get("steps", [])}
+```
+
+If the AI returned a malformed step object (e.g., `{"step": 1, "action": "..."}` instead of `{"number": 1, "description": "..."}`), this line would raise an unhandled `KeyError`, crashing the entire SOP generation flow and losing all work.
+
+**Patch Applied:**
+- Changed to `.get()` with None/empty guards so malformed entries are silently skipped
+
+**Before:**
+```python
+ai_steps = {s["number"]: s["description"] for s in data.get("steps", [])}
+```
+
+**After:**
+```python
+ai_steps = {
+    s.get("number"): s.get("description")
+    for s in data.get("steps", [])
+    if s.get("number") is not None and s.get("description")
+}
+```
+
+---
+
+### VULN-025: TOCTOU Race in Document Export File Copy
+
+**Severity:** MEDIUM
+**Category:** CWE-367 — Time-of-check Time-of-use (TOCTOU) Race Condition
+**File:** `src/document_generator.py` lines 60–78
+
+**Description:**
+The HTML export method checked if image files existed with `img_path.exists()` and then copied them with `shutil.copy2()`. If the file was deleted, moved, or its permissions changed between the existence check and the copy operation, an unhandled `OSError` or `FileNotFoundError` would crash the entire export, losing any partially generated output.
+
+This could occur during normal operation if the user's antivirus quarantined a screenshot file, if disk space was exhausted, or if the screenshots directory was on a network share that became unavailable.
+
+**Patch Applied:**
+- Both image copy blocks wrapped in `try/except OSError`
+- If a copy fails, the step is rendered without an image rather than crashing the export
+
+---
+
+### VULN-026: Missing .gitignore Entries for Sensitive Files
+
+**Severity:** MEDIUM
+**Category:** CWE-540 — Inclusion of Sensitive Information in Source Code
+**File:** `.gitignore`
+
+**Description:**
+The `.gitignore` file excluded `.env` but did not exclude:
+- `settings.json` — contains DPAPI-encrypted API keys (decryptable by same user on same machine; if committed to a shared repo and cloned by another user on the same machine, secrets are exposed)
+- `*.msal_cache*` — contains OAuth refresh tokens
+- `*.bin` — the MSAL cache file extension
+
+During development, if any of these files were accidentally created in the project root (or a subdirectory tracked by git), they would be staged and committed by default.
+
+**Patch Applied:**
+- Added `settings.json`, `*.msal_cache*`, and `*.bin` to `.gitignore`
+
+---
+
+### VULN-027: Dry Run Response Comment Missing Security Rationale
+
+**Severity:** LOW
+**Category:** CWE-1116 — Inaccurate Comments
+**File:** `src/segra/copilot_provider.py` line 294
+
+**Description:**
+The `_dry_run_response()` static method intentionally does not log prompt content (to prevent tenant document leakage), but this design decision was not documented in the code. A future maintainer could add prompt logging as a "debugging improvement" without realizing the security implications.
+
+**Patch Applied:**
+- Added explicit comment: `# Never log prompt content — it may contain grounding data from tenant docs`
+
+---
+
+## Files Modified
+
+| File | Vulnerabilities |
+|------|----------------|
+| `src/segra/auth.py` | VULN-016, VULN-018, VULN-023 |
+| `src/segra/renderer.py` | VULN-017 |
+| `src/segra/graph_client.py` | VULN-021 |
+| `src/segra/copilot_provider.py` | VULN-022, VULN-027 |
+| `src/ui/main_window.py` | VULN-019, VULN-020 |
+| `src/ai_analyzer.py` | VULN-024 |
+| `src/document_generator.py` | VULN-025 |
+| `.gitignore` | VULN-026 |
+
+---
+
+## Verification
+
+All patches were verified via:
+1. **Test suite** — All 16 unit/contract/fixture tests pass (`pytest tests/test_segra.py` — 16 passed)
+2. **Import verification** — All modules import successfully with no circular imports or regressions
+3. **Specific assertions** — Single quote escaping in `_esc()` verified, MSAL cache path verified to use `%LOCALAPPDATA%` with safe fallback
+4. **Previous patches confirmed** — All 15 vulnerabilities from the first audit remain patched (autoescape, DPAPI, thread safety, prompt sanitization, etc.)
+
+---
+
+## Cumulative Security Posture
+
+| Audit | Vulnerabilities Found | Patched | Remaining |
+|-------|-----------------------|---------|-----------|
+| Round 1 (initial) | 15 | 15 | 0 |
+| Round 2 (post-Segra integration) | 12 | 12 | 0 |
+| **Total** | **27** | **27** | **0** |

@@ -198,10 +198,16 @@ class SegraCopilotProvider(AIProvider):
 
         # Step 3: Dry run check
         if self._dry_run:
-            log.info("=== DRY RUN — prompt that would be sent ===\n%s", prompt)
+            log.info(
+                "=== DRY RUN — prompt length: %d chars, "
+                "grounding: %s, steps: %d ===",
+                len(prompt),
+                "yes" if grounding_context else "no",
+                len(steps_summary),
+            )
             return SOPDocument(
                 title="[DRY RUN] No API call made",
-                purpose="Dry run mode is enabled. See logs for the prompt.",
+                purpose="Dry run mode is enabled. No data was sent.",
                 procedure_steps=[],
             )
 
@@ -287,8 +293,9 @@ class SegraCopilotProvider(AIProvider):
 
     @staticmethod
     def _dry_run_response(method: str, prompt: str) -> str:
-        """Return a placeholder response in dry-run mode."""
+        """Return a placeholder response in dry-run mode (no content logged)."""
         log.info("[DRY RUN] %s called — prompt length: %d chars", method, len(prompt))
+        # Never log prompt content — it may contain grounding data from tenant docs
         return json.dumps({
             "title": "[DRY RUN]",
             "purpose": "Dry run mode — no API call was made.",

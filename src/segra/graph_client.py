@@ -69,9 +69,8 @@ class GraphSearchClient:
 
         except httpx.HTTPStatusError as e:
             log.warning(
-                "Graph Search failed: HTTP %d — %s",
+                "Graph Search failed: HTTP %d",
                 e.response.status_code,
-                e.response.text[:200] if e.response.text else "no body",
             )
             return []
         except httpx.RequestError as e:

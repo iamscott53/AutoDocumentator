@@ -304,7 +304,11 @@ class AIAnalyzer:
         if data.get("purpose"):
             recording.description = data["purpose"]
 
-        ai_steps = {s["number"]: s["description"] for s in data.get("steps", [])}
+        ai_steps = {
+            s.get("number"): s.get("description")
+            for s in data.get("steps", [])
+            if s.get("number") is not None and s.get("description")
+        }
         for step in recording.steps:
             improved = ai_steps.get(step.number)
             if improved:

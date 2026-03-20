@@ -58,24 +58,29 @@ class DocumentGenerator:
             # Get the best available image
             img_path = step.thumbnail_path or step.annotated_screenshot_path
             if img_path and img_path.exists():
-                if embed_images:
-                    step_dict["image_src"] = self._image_to_data_uri(img_path)
-                else:
-                    # Copy image to output directory
-                    img_dir = output_path.parent / "images"
-                    img_dir.mkdir(exist_ok=True)
-                    dest = img_dir / img_path.name
-                    shutil.copy2(img_path, dest)
-                    step_dict["image_src"] = f"images/{img_path.name}"
+                try:
+                    if embed_images:
+                        step_dict["image_src"] = self._image_to_data_uri(img_path)
+                    else:
+                        img_dir = output_path.parent / "images"
+                        img_dir.mkdir(exist_ok=True)
+                        dest = img_dir / img_path.name
+                        shutil.copy2(img_path, dest)
+                        step_dict["image_src"] = f"images/{img_path.name}"
+                except OSError:
+                    pass  # Skip image if file became inaccessible
 
             # Full screenshot link (only as separate files, never embedded)
             full_img = step.annotated_screenshot_path or step.screenshot_path
             if full_img and full_img.exists() and not embed_images:
-                img_dir = output_path.parent / "images"
-                img_dir.mkdir(exist_ok=True)
-                dest = img_dir / f"full_{full_img.name}"
-                shutil.copy2(full_img, dest)
-                step_dict["full_image_src"] = f"images/full_{full_img.name}"
+                try:
+                    img_dir = output_path.parent / "images"
+                    img_dir.mkdir(exist_ok=True)
+                    dest = img_dir / f"full_{full_img.name}"
+                    shutil.copy2(full_img, dest)
+                    step_dict["full_image_src"] = f"images/full_{full_img.name}"
+                except OSError:
+                    step_dict["full_image_src"] = ""
             else:
                 step_dict["full_image_src"] = ""
 

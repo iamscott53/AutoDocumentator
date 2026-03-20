@@ -870,7 +870,13 @@ class MainWindow(ctk.CTk):
             messagebox.showerror("Missing Package", str(e))
             return None
         except Exception as e:
-            messagebox.showerror("Provider Error", f"Failed to create AI provider:\n{e}")
+            # Show only the exception type, never the message (may contain secrets)
+            messagebox.showerror(
+                "Provider Error",
+                f"Failed to create AI provider.\n"
+                f"Error type: {type(e).__name__}\n\n"
+                "Check your configuration in Settings.",
+            )
             return None
 
     def _show_progress_dialog(self, title: str) -> tuple:
@@ -933,7 +939,7 @@ class MainWindow(ctk.CTk):
                 )
                 self.after(0, on_complete, None)
             except Exception as e:
-                self.after(0, on_complete, str(e))
+                self.after(0, on_complete, f"{type(e).__name__}: check configuration")
 
         def on_complete(error):
             progress.destroy()
@@ -980,7 +986,7 @@ class MainWindow(ctk.CTk):
                 )
                 self.after(0, on_complete, None)
             except Exception as e:
-                self.after(0, on_complete, str(e))
+                self.after(0, on_complete, f"{type(e).__name__}: check configuration")
 
         def on_complete(error):
             progress.destroy()

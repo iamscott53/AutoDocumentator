@@ -201,10 +201,11 @@ def render_docx(sop: SOPDocument, output_path: Path) -> Path:
 
 
 def _esc(text: str) -> str:
-    """HTML-escape a string."""
+    """HTML-escape a string (all five dangerous characters)."""
     return (
         text.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
+        .replace("'", "&#x27;")
     )

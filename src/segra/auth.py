@@ -10,6 +10,8 @@ produces permission-trimmed results tied to the signed-in user.
 
 import logging
 import os
+import stat
+import sys
 import threading
 from pathlib import Path
 
@@ -19,9 +21,31 @@ log = logging.getLogger(__name__)
 GRAPH_SCOPES = ["https://graph.microsoft.com/Files.Read", "https://graph.microsoft.com/Sites.Read.All"]
 AOAI_SCOPE = ["https://cognitiveservices.azure.com/.default"]
 
-# Token cache location — next to the executable / project root
-_CACHE_DIR = Path(os.environ.get("LOCALAPPDATA", ".")) / "AutoDocumentator"
+# Token cache location — secure per-user directory
+_CACHE_DIR = Path(
+    os.environ.get("LOCALAPPDATA")
+    or Path.home() / "AppData" / "Local"
+) / "AutoDocumentator"
 _CACHE_FILE = _CACHE_DIR / ".msal_cache.bin"
+
+
+def _restrict_file_permissions(path: Path):
+    """Set file to owner-read/write only. Best-effort on Windows."""
+    try:
+        if sys.platform == "win32":
+            # On Windows, use icacls to restrict to current user only
+            import subprocess
+            username = os.environ.get("USERNAME", "")
+            if username:
+                subprocess.run(
+                    ["icacls", str(path), "/inheritance:r",
+                     "/grant:r", f"{username}:(R,W)"],
+                    capture_output=True, timeout=5,
+                )
+        else:
+            path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    except Exception as e:
+        log.debug("Could not restrict permissions on %s: %s", path, e)
 
 
 class EntraAuth:
@@ -49,7 +73,6 @@ class EntraAuth:
             self._cache.deserialize(_CACHE_FILE.read_text(encoding="utf-8"))
 
         if client_secret:
-            # App-only (confidential client)
             self._app = msal.ConfidentialClientApplication(
                 client_id,
                 authority=authority,
@@ -57,7 +80,6 @@ class EntraAuth:
                 token_cache=self._cache,
             )
         else:
-            # Delegated (public client — desktop app)
             self._app = msal.PublicClientApplication(
                 client_id,
                 authority=authority,
@@ -75,7 +97,6 @@ class EntraAuth:
     def _acquire(self, scopes: list[str]) -> str:
         """Acquire a token, trying silent first, then interactive/credential."""
         with self._lock:
-            # Try silent (cached token)
             accounts = self._app.get_accounts()
             if accounts:
                 result = self._app.acquire_token_silent(scopes, account=accounts[0])
@@ -83,7 +104,6 @@ class EntraAuth:
                     self._persist_cache()
                     return result["access_token"]
 
-            # Fall through to active acquisition
             if self._client_secret:
                 result = self._app.acquire_token_for_client(scopes=scopes)
             else:
@@ -92,18 +112,24 @@ class EntraAuth:
             if not result:
                 raise RuntimeError("MSAL returned no result")
             if "error" in result:
-                desc = result.get("error_description", result["error"])
-                raise RuntimeError(f"Token acquisition failed: {desc}")
+                # Log the full error for diagnostics, show only the code to the user
+                error_code = result.get("error", "unknown_error")
+                log.warning("MSAL error: %s", error_code)
+                raise RuntimeError(
+                    f"Authentication failed (error: {error_code}). "
+                    "Check tenant/client configuration."
+                )
 
             self._persist_cache()
             return result["access_token"]
 
     def _persist_cache(self):
-        """Write the token cache to disk if it changed."""
+        """Write the token cache to disk if it changed, with restricted permissions."""
         if self._cache.has_state_changed:
             try:
                 _CACHE_FILE.write_text(
                     self._cache.serialize(), encoding="utf-8"
                 )
+                _restrict_file_permissions(_CACHE_FILE)
             except OSError as e:
                 log.warning("Failed to persist token cache: %s", e)
