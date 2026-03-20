@@ -1,0 +1,42 @@
+{
+  "steps": [
+    {
+      "number": 1,
+      "action_type": "click",
+      "current_description": "Click at (500, 300) in Google Chrome",
+      "window": "Google Chrome",
+      "application": "chrome.exe"
+    },
+    {
+      "number": 2,
+      "action_type": "type",
+      "current_description": "Type \"admin@company.com\"",
+      "window": "Login - Google Chrome",
+      "application": "chrome.exe",
+      "typed_text": "admin@company.com"
+    },
+    {
+      "number": 3,
+      "action_type": "hotkey",
+      "current_description": "Press Tab",
+      "window": "Login - Google Chrome",
+      "application": "chrome.exe",
+      "hotkey": "Tab"
+    },
+    {
+      "number": 4,
+      "action_type": "type",
+      "current_description": "Type \"********\"",
+      "window": "Login - Google Chrome",
+      "application": "chrome.exe",
+      "typed_text": "********"
+    },
+    {
+      "number": 5,
+      "action_type": "click",
+      "current_description": "Click at (600, 450) in Google Chrome",
+      "window": "Login - Google Chrome",
+      "application": "chrome.exe"
+    }
+  ]
+}

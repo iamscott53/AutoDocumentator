@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+output/
+*.egg-info/
+dist/
+build/
+.env
+.claude/
+.pytest_cache/
+*.7z
